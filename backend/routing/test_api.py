@@ -79,3 +79,57 @@ def test_explain_picks_first_differing_criterion():
     assert "Severe" in explain(m(0, 50, 9), m(10, 0, 1))
     assert "High" in explain(m(0, 10, 9), m(0, 40, 1))
     assert "travel time" in explain(m(0, 0, 2), m(0, 0, 3))
+
+
+def test_single_route_missing_alternatives(monkeypatch):
+    monkeypatch.setattr(providers, "geocode", lambda q: (0.0, 0.0) if q == "A" else (0.0, 2.0))
+    monkeypatch.setattr(providers, "fetch_routes", lambda o, d: [RawRoute([(0, 0), (0, 2)], 100, 2)])
+    monkeypatch.setattr(providers, "fetch_weather", lambda pts: [Weather(5, 0, 0) for _ in pts])
+    r = post(payload())
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data["routes"]) == 1
+    assert data["recommended_index"] == 0
+    assert "Only one route was available" in data["recommendation_reason"]
+
+
+def test_three_routes_supported(monkeypatch):
+    monkeypatch.setattr(providers, "geocode", lambda q: (0.0, 0.0) if q == "A" else (0.0, 2.0))
+    monkeypatch.setattr(providers, "fetch_routes", lambda o, d: [
+        RawRoute([(0, 0), (0, 2)], 100, 2),
+        RawRoute([(1, 0), (1, 2)], 120, 2.5),
+        RawRoute([(2, 0), (2, 2)], 140, 3.0),
+    ])
+    monkeypatch.setattr(providers, "fetch_weather", lambda pts: [Weather(5, 0, 0) for _ in pts])
+    r = post(payload())
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data["routes"]) == 3
+
+
+def test_upstream_api_failure_is_502(fake_providers, monkeypatch):
+    import requests
+    def boom(*a, **kw): raise requests.RequestException("OSRM or weather service timed out")
+    monkeypatch.setattr(providers, "fetch_routes", boom)
+    r = post(payload())
+    assert r.status_code == 502
+    assert "routing or weather service is unavailable" in r.json()["error"]
+
+
+def test_fetch_routes_deduplication(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self): pass
+        def json(self):
+            return {
+                "code": "Ok",
+                "routes": [
+                    {"geometry": {"coordinates": [[0, 0], [1, 1]]}, "distance": 1609.344, "duration": 3600},
+                    {"geometry": {"coordinates": [[0, 0], [1, 1]]}, "distance": 1609.344, "duration": 3600},
+                    {"geometry": {"coordinates": [[0, 0], [2, 2]]}, "distance": 3218.688, "duration": 7200},
+                ]
+            }
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *a, **kw: FakeResponse())
+    routes = providers.fetch_routes((0, 0), (1, 1))
+    assert len(routes) == 2
+

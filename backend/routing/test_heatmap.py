@@ -120,3 +120,13 @@ def test_heatmap_forecast_out_of_range(monkeypatch):
     def boom(*a): raise ForecastRangeError("too far")
     monkeypatch.setattr(providers, "fetch_weather_window", boom)
     assert post(body()).status_code == 422
+
+
+def test_heatmap_upstream_failure_is_502(monkeypatch):
+    import requests
+    def boom(*a): raise requests.RequestException("connection failed")
+    monkeypatch.setattr(providers, "fetch_weather_window", boom)
+    r = post(body())
+    assert r.status_code == 502
+    assert "The weather service is unavailable" in r.json()["error"]
+

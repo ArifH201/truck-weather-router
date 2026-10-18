@@ -6,6 +6,7 @@
     server, so for production use a hosted OSRM/ORS/Mapbox instance.
   * Weather:   Open-Meteo hourly forecast, up to 16 days ahead.
 """
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -17,7 +18,7 @@ from .geo import METERS_PER_MILE
 from .weather import extract_weather, hourly_window
 
 USER_AGENT = "truck-weather-router/0.1 (assessment project)"
-TIMEOUT = 15
+TIMEOUT = int(os.environ.get("WEATHER_TIMEOUT", "25"))
 # OSRM uses car speeds; heavy trucks are slower. Stated assumption, tweak freely.
 TRUCK_TIME_FACTOR = 1.15
 WEATHER_CHUNK = 50          # locations per Open-Meteo request
@@ -50,26 +51,53 @@ def fetch_routes(origin, dest) -> list:
                      headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
     r.raise_for_status()
     data = r.json()
-    if data.get("code") != "Ok":
+    if data.get("code") != "Ok" or not data.get("routes"):
         raise LookupError(f"No route found: {data.get('code')}")
-    return [RawRoute(
-        coords=[(lat, lon) for lon, lat in rt["geometry"]["coordinates"]],
-        distance_miles=rt["distance"] / METERS_PER_MILE,
-        duration_hours=rt["duration"] / 3600 * TRUCK_TIME_FACTOR,
-    ) for rt in data["routes"][:3]]
+
+    routes = []
+    seen = set()
+    for rt in data.get("routes", []):
+        coords = [(lat, lon) for lon, lat in rt["geometry"]["coordinates"]]
+        # Fingerprint route to discard identical duplicates
+        key = (round(rt["distance"], 1), round(rt["duration"], 1), coords[0], coords[-1], len(coords))
+        if key in seen:
+            continue
+        seen.add(key)
+        routes.append(RawRoute(
+            coords=coords,
+            distance_miles=rt["distance"] / METERS_PER_MILE,
+            duration_hours=rt["duration"] / 3600 * TRUCK_TIME_FACTOR,
+        ))
+        if len(routes) == 3:
+            break
+
+    if not routes:
+        raise LookupError(f"No route found: {data.get('code')}")
+    return routes
 
 
 def _fetch_chunk(chunk: list) -> list:
-    r = requests.get("https://api.open-meteo.com/v1/forecast", params={
-        "latitude": ",".join(str(k[0]) for k in chunk),
-        "longitude": ",".join(str(k[1]) for k in chunk),
-        "hourly": "wind_speed_10m,rain,showers,snowfall",
-        "wind_speed_unit": "mph", "timezone": "GMT", "forecast_days": 16,
-    }, timeout=TIMEOUT)
-    r.raise_for_status()
-    payload = r.json()
-    payload = payload if isinstance(payload, list) else [payload]  # 1 location -> dict
-    return [(k, item["hourly"]) for k, item in zip(chunk, payload)]
+    attempts = 3
+    for attempt in range(attempts):
+        try:
+            r = requests.get("https://api.open-meteo.com/v1/forecast", params={
+                "latitude": ",".join(str(k[0]) for k in chunk),
+                "longitude": ",".join(str(k[1]) for k in chunk),
+                "hourly": "wind_speed_10m,rain,showers,snowfall",
+                "wind_speed_unit": "mph", "timezone": "GMT", "forecast_days": 16,
+            }, timeout=TIMEOUT)
+            if getattr(r, "status_code", 200) == 429 and attempt < attempts - 1:
+                time.sleep(0.5 * (2 ** attempt))
+                continue
+            r.raise_for_status()
+            payload = r.json()
+            payload = payload if isinstance(payload, list) else [payload]  # 1 location -> dict
+            return [(k, item["hourly"]) for k, item in zip(chunk, payload)]
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+            if attempt < attempts - 1:
+                time.sleep(0.5 * (2 ** attempt))
+                continue
+            raise
 
 
 def _fetch_hourly(keys: list) -> None:
