@@ -2,9 +2,10 @@ services:
   - type: web
     name: truck-router-api
     runtime: python
+    plan: free          # without this line Render defaults to a paid plan
     rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn config.wsgi --workers 2 --threads 4 --timeout 60
+    startCommand: gunicorn config.wsgi --workers 1 --threads 8 --timeout 60
     healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION
@@ -15,3 +16,4 @@ services:
         generateValue: true
       - key: CORS_ALLOWED_ORIGINS
         sync: false        # set to your Vercel URL after the frontend deploys
+        
