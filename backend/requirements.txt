@@ -1,0 +1,6 @@
+Django>=5.0,<6
+django-cors-headers>=4.3
+requests>=2.31
+gunicorn>=22
+pytest>=8
+pytest-django>=4.8

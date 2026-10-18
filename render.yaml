@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: truck-router-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn config.wsgi --workers 2 --threads 4 --timeout 60
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: DJANGO_DEBUG
+        value: "0"
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false        # set to your Vercel URL after the frontend deploys
