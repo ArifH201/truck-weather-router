@@ -6,6 +6,7 @@
     server, so for production use a hosted OSRM/ORS/Mapbox instance.
   * Weather:   Open-Meteo hourly forecast, up to 16 days ahead.
 """
+import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +27,14 @@ WEATHER_WORKERS = 4         # parallel Open-Meteo requests
 CACHE_TTL = 30 * 60
 _cache: dict = {}           # (lat2dp, lon2dp) -> (fetched_at, hourly)
 _last_geocode = 0.0         # Nominatim policy: at most 1 request/second
+
+
+def _is_distinct_route(new_dist: float, routes: list, threshold: float = 0.03) -> bool:
+    for r in routes:
+        diff = abs(new_dist - r.distance_miles * METERS_PER_MILE) / max(r.distance_miles * METERS_PER_MILE, 1.0)
+        if diff < threshold:
+            return False
+    return True
 
 
 @lru_cache(maxsize=256)
@@ -57,19 +66,65 @@ def fetch_routes(origin, dest) -> list:
     routes = []
     seen = set()
     for rt in data.get("routes", []):
-        coords = [(lat, lon) for lon, lat in rt["geometry"]["coordinates"]]
+        coords_list = [(lat, lon) for lon, lat in rt["geometry"]["coordinates"]]
         # Fingerprint route to discard identical duplicates
-        key = (round(rt["distance"], 1), round(rt["duration"], 1), coords[0], coords[-1], len(coords))
+        key = (round(rt["distance"], 1), round(rt["duration"], 1), coords_list[0], coords_list[-1], len(coords_list))
         if key in seen:
             continue
         seen.add(key)
         routes.append(RawRoute(
-            coords=coords,
+            coords=coords_list,
             distance_miles=rt["distance"] / METERS_PER_MILE,
             duration_hours=rt["duration"] / 3600 * TRUCK_TIME_FACTOR,
         ))
         if len(routes) == 3:
             break
+
+    # If the provider returns fewer than 3 alternatives, use supported corridor via-points
+    # to obtain distinct, valid road routes with real geometry and duration.
+    if 1 <= len(routes) < 3:
+        primary_dist_m = routes[0].distance_miles * METERS_PER_MILE
+        lat1, lon1 = origin
+        lat2, lon2 = dest
+        mid_lat = (lat1 + lat2) / 2.0
+        mid_lon = (lon1 + lon2) / 2.0
+        dlat = lat2 - lat1
+        dlon = (lon2 - lon1) * math.cos(math.radians(mid_lat))
+        span = math.hypot(dlat, dlon)
+
+        if span > 0.05:
+            # Perpendicular vector to explore lateral corridor options
+            nlat = -dlon / span
+            nlon = dlat / span
+            candidates = []
+            for ratio in [0.10, -0.10, 0.18, -0.18, 0.25, -0.25]:
+                vlat = mid_lat + ratio * span * nlat
+                vlon = mid_lon + (ratio * span * nlon) / math.cos(math.radians(mid_lat))
+                candidates.append((round(vlat, 5), round(vlon, 5)))
+
+            for via in candidates:
+                via_coords = f"{origin[1]},{origin[0]};{via[1]},{via[0]};{dest[1]},{dest[0]}"
+                try:
+                    res = requests.get(f"https://router.project-osrm.org/route/v1/driving/{via_coords}",
+                                       params={"overview": "full", "geometries": "geojson"},
+                                       headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
+                    if getattr(res, "status_code", 200) == 200:
+                        vdata = res.json()
+                        if vdata.get("code") == "Ok" and vdata.get("routes"):
+                            cand_rt = vdata["routes"][0]
+                            cand_dist = cand_rt["distance"]
+                            # Must not be absurdly long (< 35% detour) and must be distinct
+                            if cand_dist <= primary_dist_m * 1.35 and _is_distinct_route(cand_dist, routes):
+                                cand_coords = [(lat, lon) for lon, lat in cand_rt["geometry"]["coordinates"]]
+                                routes.append(RawRoute(
+                                    coords=cand_coords,
+                                    distance_miles=cand_dist / METERS_PER_MILE,
+                                    duration_hours=cand_rt["duration"] / 3600 * TRUCK_TIME_FACTOR,
+                                ))
+                                if len(routes) == 3:
+                                    break
+                except Exception:
+                    pass
 
     if not routes:
         raise LookupError(f"No route found: {data.get('code')}")

@@ -116,20 +116,87 @@ def test_upstream_api_failure_is_502(fake_providers, monkeypatch):
     assert "routing or weather service is unavailable" in r.json()["error"]
 
 
-def test_fetch_routes_deduplication(monkeypatch):
-    class FakeResponse:
-        def raise_for_status(self): pass
-        def json(self):
-            return {
-                "code": "Ok",
-                "routes": [
-                    {"geometry": {"coordinates": [[0, 0], [1, 1]]}, "distance": 1609.344, "duration": 3600},
-                    {"geometry": {"coordinates": [[0, 0], [1, 1]]}, "distance": 1609.344, "duration": 3600},
-                    {"geometry": {"coordinates": [[0, 0], [2, 2]]}, "distance": 3218.688, "duration": 7200},
-                ]
-            }
+def test_two_routes_supported(monkeypatch):
+    monkeypatch.setattr(providers, "geocode", lambda q: (0.0, 0.0) if q == "A" else (0.0, 2.0))
+    monkeypatch.setattr(providers, "fetch_routes", lambda o, d: [
+        RawRoute([(0, 0), (0, 2)], 100, 2),
+        RawRoute([(1, 0), (1, 2)], 120, 2.5),
+    ])
+    monkeypatch.setattr(providers, "fetch_weather", lambda pts: [Weather(5, 0, 0) for _ in pts])
+    r = post(payload())
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data["routes"]) == 2
+
+
+def test_fetch_routes_via_alternative_generation(monkeypatch):
+    # Simulates OSRM returning 2 routes initially, and via-point query returning a 3rd distinct route
+    call_count = 0
+    def mock_get(url, params=None, **kw):
+        nonlocal call_count
+        call_count += 1
+        class Resp:
+            def raise_for_status(self): pass
+            def json(self):
+                if ";".join(url.split("/")[-1].split(";")) and call_count == 1:
+                    # Initial call: 2 routes
+                    return {
+                        "code": "Ok",
+                        "routes": [
+                            {"geometry": {"coordinates": [[-87.62, 41.88], [-97.34, 37.69]]}, "distance": 1140000, "duration": 46000},
+                            {"geometry": {"coordinates": [[-87.62, 41.88], [-93.60, 41.58], [-97.34, 37.69]]}, "distance": 1164000, "duration": 47000},
+                        ]
+                    }
+                else:
+                    # Via query: 3rd route
+                    return {
+                        "code": "Ok",
+                        "routes": [
+                            {"geometry": {"coordinates": [[-87.62, 41.88], [-90.20, 38.63], [-97.34, 37.69]]}, "distance": 1220000, "duration": 50000}
+                        ]
+                    }
+        return Resp()
+
     import requests
-    monkeypatch.setattr(requests, "get", lambda *a, **kw: FakeResponse())
-    routes = providers.fetch_routes((0, 0), (1, 1))
+    monkeypatch.setattr(requests, "get", mock_get)
+    routes = providers.fetch_routes((41.88, -87.62), (37.69, -97.34))
+    assert len(routes) == 3
+
+
+def test_fetch_routes_fallback_when_alternative_fails(monkeypatch):
+    # Simulates OSRM returning 2 routes initially, and via-point queries failing or timing out
+    call_count = 0
+    def mock_get(url, params=None, **kw):
+        nonlocal call_count
+        call_count += 1
+        class Resp:
+            def raise_for_status(self): pass
+            def json(self):
+                return {
+                    "code": "Ok",
+                    "routes": [
+                        {"geometry": {"coordinates": [[-87.62, 41.88], [-97.34, 37.69]]}, "distance": 1140000, "duration": 46000},
+                        {"geometry": {"coordinates": [[-87.62, 41.88], [-93.60, 41.58], [-97.34, 37.69]]}, "distance": 1164000, "duration": 47000},
+                    ]
+                }
+        if call_count > 1:
+            raise requests.RequestException("Via query failed")
+        return Resp()
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+    routes = providers.fetch_routes((41.88, -87.62), (37.69, -97.34))
     assert len(routes) == 2
+
+
+def test_fetch_routes_no_route_raises_lookup():
+    class Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"code": "NoRoute", "routes": []}
+    import requests
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(requests, "get", lambda *a, **kw: Resp())
+    with pytest.raises(LookupError):
+        providers.fetch_routes((0, 0), (1, 1))
+
 
