@@ -1,61 +1,79 @@
-# Deployment
+# Deployment (free): GitHub + Vercel
 
-Backend on Render, frontend on Vercel. Both have free tiers. Deploy the backend
-first because the frontend build needs its URL.
+Code lives on GitHub. Both the Django API and the React app are hosted on Vercel's
+free (Hobby) plan as two separate Vercel projects from the same repository.
+GitHub Pages is not used because it serves static files only and cannot run Django.
+
+Deploy the backend first, because the frontend build needs its URL.
 
 ## 1. Push to GitHub
 
 Create a public repository and push the project root (it contains `backend/`,
-`frontend/`, `README.md`, and `render.yaml`). Check that no `node_modules/` or
-`.env` file is committed.
+`frontend/`, and `README.md`). Check that no `node_modules/`, `.venv/` or `.env`
+file is committed.
 
-## 2. Backend on Render
+## 2. Backend on Vercel
 
-1. Render dashboard → **New → Blueprint** → select the repo. It reads `render.yaml`.
-   (Or create a Web Service manually: root directory `backend`, build
-   `pip install -r requirements.txt`, start `gunicorn config.wsgi --workers 2 --threads 4 --timeout 60`.)
-2. Wait for the first deploy, then open `https://<service>.onrender.com/api/health`.
-   You should see `{"status": "ok"}`.
-3. Note the service URL.
+1. vercel.com → sign in with GitHub → **Add New → Project** → import the repo.
+2. Set **Root Directory** to `backend`. Vercel finds `manage.py` and detects Django
+   (the framework preset should say Django).
+3. Add **Environment Variables**:
+   - `DJANGO_DEBUG` = `0`
+   - `DJANGO_SECRET_KEY` = a long random string
+     (generate one with `python -c "import secrets; print(secrets.token_urlsafe(50))"`)
+   - `CORS_ALLOWED_ORIGINS` = `https://placeholder.vercel.app` (changed in step 4)
+4. **Deploy**, then open `https://<backend>.vercel.app/api/health`. You should see
+   `{"status": "ok", "demo_enabled": false}`.
+
+`backend/vercel.json` lets the API run for up to 60 seconds, since a trip analysis
+makes several external calls.
 
 ## 3. Frontend on Vercel
 
-1. Vercel → **Add New → Project** → import the same repo.
-2. Set **Root Directory** to `frontend`. Framework preset: Vite
-   (build `npm run build`, output `dist`).
-3. Add the environment variable `VITE_API_URL` = your Render URL, with no trailing slash.
-4. Deploy and note the Vercel URL.
+1. **Add New → Project** → import the **same** repo again.
+2. Set **Root Directory** to `frontend` (framework preset: Vite).
+3. Add the environment variable `VITE_API_URL` = the backend URL from step 2
+   (for example `https://truck-router-api.vercel.app`, no trailing slash).
+4. **Deploy** and note the frontend URL.
 
-## 4. Allow the frontend to call the backend (CORS)
+## 4. Connect them (CORS)
 
-In Render → the service → **Environment**, set
-`CORS_ALLOWED_ORIGINS` = your Vercel URL (e.g. `https://my-app.vercel.app`, no
-trailing slash). Several origins can be comma-separated. Redeploy if Render does not
-restart automatically. Without this the browser blocks every API call.
+In the **backend** project → Settings → Environment Variables, change
+`CORS_ALLOWED_ORIGINS` to the exact frontend URL (no trailing slash, no path), then
+**Redeploy** (Deployments → the latest one → Redeploy). Environment changes only
+apply to new deployments.
 
 ## 5. Pre-submission checklist
 
-- [ ] Run a real trip on the **hosted** app (e.g. Chicago → Denver, tomorrow, 42,000 lb)
-- [ ] Try a heavy load and a light one on the same trip and confirm risk changes
-- [ ] Try a nonsense place name and a past date and confirm the error messages
-- [ ] Scrub the heatmap slider and confirm it is smooth
-- [ ] Check it on a phone-width window
-- [ ] Put the live URL and Loom link at the top of the README
+- [ ] `/api/health` works on the backend URL
+- [ ] A real trip works on the hosted frontend (e.g. Chicago → Denver, tomorrow, 42,000 lb)
+- [ ] Heavy vs light load changes risk
+- [ ] Nonsense place and past date show clear errors
+- [ ] Heatmap slider is smooth
+- [ ] Live URL and Loom link are at the top of the README
 - [ ] Repository is public and the README setup steps work from a clean clone
 
-## Known free-tier behaviour
+## Troubleshooting
 
-- **Cold starts:** Render's free tier sleeps after inactivity, and the first request
-  can take about a minute. Open the app a few minutes before a reviewer might, and
-  mention it in the README or Loom.
-- **Geocoding from shared hosting IPs:** Nominatim may rate-limit or block busy
-  shared IPs. If geocoding fails only on the hosted app, switch `geocode` in
-  `providers.py` to another provider (e.g. Mapbox or OpenRouteService with a free key).
-- **Cache is per worker and lost on restart.** This is fine for a demo.
+- **"Cannot reach the server" in the app:** `VITE_API_URL` is missing or wrong.
+  Fix it in the frontend project and **Redeploy** (it is baked in at build time).
+- **CORS error in the browser console:** `CORS_ALLOWED_ORIGINS` does not match the
+  frontend URL exactly, or you did not redeploy the backend after changing it.
+- **Backend build fails on the Python version:** open the backend project's settings
+  and choose Python 3.11 or newer (Django 5 needs 3.10+).
+- **Error 500 or a timeout:** Vercel → backend project → Deployments → the
+  deployment → **Logs** shows the Python error. Paste it to get help.
+- **"Could not find location" only on the hosted app:** the free geocoder
+  (Nominatim) may rate-limit Vercel's shared IPs. Only `geocode` in
+  `backend/routing/providers.py` needs to change to another provider.
 
-## Optional: demo mode on the hosted app
+## Free-tier notes
 
-Demo mode (simulated storm) is disabled in production by default. To show it on the
-hosted app, add `DEMO_WEATHER_ENABLED=1` in Render's environment. Say clearly in the
-README and Loom that it is simulated; the app labels it on screen too. Leave it off
-for the real submission if you prefer reviewers to see only live forecasts.
+- The first request after a quiet period is a little slower (a function cold start,
+  a few seconds, not a minute).
+- The weather cache lives in memory per function instance, so it is not shared
+  across instances and is lost when an instance is recycled. Fine for a demo; Redis
+  would be the next step.
+- Optional demo mode (simulated storm) is off in production. To enable it, add
+  `DEMO_WEATHER_ENABLED=1` to the backend project, and say clearly that it is
+  simulated. For the real submission, leaving it off is cleaner.
